@@ -5,26 +5,25 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"sync"
 )
 
 type Initializer interface {
 	Initialize()
 }
 
-func InitializeAll(initializers...Initializer) {
-	for _, initializer := range initializers{
+func InitializeAll(initializers ...Initializer) {
+	for _, initializer := range initializers {
 		initializer.Initialize()
 	}
 }
 
 type GetNameRe struct {
 	pwd string
-	ok bool
+	ok  bool
 }
 type NamePwd struct {
 	name string
-	pwd string
+	pwd  string
 }
 type DBManager struct {
 	accountDB map[string]string //存储用户名密码
@@ -34,7 +33,8 @@ type DBManager struct {
 	getNameReCh chan GetNameRe
 	setPwdCh    chan NamePwd
 }
-func (db *DBManager) Initialize(){
+
+func (db *DBManager) Initialize() {
 	db.accountDB = make(map[string]string)
 	//db.dbch = make(chan map[string]string)
 	db.getNameCh = make(chan string)
@@ -45,9 +45,9 @@ func (db *DBManager) Initialize(){
 	fmt.Println(db.accountDB)
 }
 func (db *DBManager) DBChekName(name string) (string, bool) {
-	db.getNameCh<-name
+	db.getNameCh <- name
 	select {
-	case result := <- db.getNameReCh:
+	case result := <-db.getNameReCh:
 		return result.pwd, result.ok
 	}
 }
@@ -60,22 +60,24 @@ func (db *DBManager) DBSetName(name string, pwd string) {
 func (db *DBManager) ChannelOp() {
 	for {
 		select {
-		case name := <-db.getNameCh:{
-			pwd, ok := db.accountDB[name]
-			db.getNameReCh <- GetNameRe{pwd, ok}
-		}
-		case val:= <-db.setPwdCh:{
-			//TODO: need to return false, cauze two terminal may DBChekName simultaneously,
-			//so check if “db.accountDB[name] = pwd” already exist, if so return false caz register already
-			db.accountDB[val.name] = val.pwd
-		}
+		case name := <-db.getNameCh:
+			{
+				pwd, ok := db.accountDB[name]
+				db.getNameReCh <- GetNameRe{pwd, ok}
+			}
+		case val := <-db.setPwdCh:
+			{
+				//TODO: need to return false, cauze two terminal may DBChekName simultaneously,
+				//so check if “db.accountDB[name] = pwd” already exist, if so return false caz register already
+				db.accountDB[val.name] = val.pwd
+			}
 		}
 	}
 }
 
 type OnlineInfo struct {
 	//ternimalCount int
-	ch chan string
+	ch   chan string
 	conn net.Conn
 }
 
@@ -85,80 +87,94 @@ type NameInfo struct {
 	info OnlineInfo
 }
 type OnlineCache struct {
-	nameChanMap   map[string]UserTerminal //用户名-通道-连接
-	mutex         *sync.RWMutex
-	setNameInfoCh chan NameInfo
-	getLenCh      chan string
-	getLenReCh	  chan int
+	nameChanMap        map[string]UserTerminal //用户名-通道-连接
+	setNameInfoCh      chan NameInfo
+	getLenCh           chan string
+	getLenReCh         chan int
+	popOnlineInfoCh    chan string
+	deleteOnlineInfoCh chan string
 }
-func (olc *OnlineCache) Initialize(){
+
+func (olc *OnlineCache) Initialize() {
 	olc.nameChanMap = make(map[string]UserTerminal)
 	olc.setNameInfoCh = make(chan NameInfo)
 	olc.getLenCh = make(chan string)
 	olc.getLenReCh = make(chan int)
+	olc.popOnlineInfoCh = make(chan string)
+	olc.deleteOnlineInfoCh = make(chan string)
 	go olc.ChannelOp()
-	olc.mutex = &sync.RWMutex{}
 	fmt.Print("OnlineCache Initialize\n")
 	fmt.Println(olc.nameChanMap)
 }
 func (olc *OnlineCache) ChannelOp() {
 	for {
 		select {
-		case  val := <-olc.setNameInfoCh:{
-			olc.OLCAppendAndPop(val.name, val.info)
-		}
-		case name := <-olc.getLenCh:{
-			olc.getLenReCh<- len(olc.nameChanMap[name])
-		}
+		case val := <-olc.setNameInfoCh:
+			{
+				olc.OLCAppend(val.name, val.info)
+			}
+		case name := <-olc.getLenCh:
+			{
+				olc.getLenReCh <- len(olc.nameChanMap[name])
+			}
+		case name := <-olc.popOnlineInfoCh:
+			{
+				//出队操作
+				olc.nameChanMap[name] = olc.nameChanMap[name][1:]
+			}
+		case name := <-olc.deleteOnlineInfoCh:
+			{
+				//delete only if the last conn
+				fmt.Printf("OnlineCache delete last %s\n", name)
+				delete(olc.nameChanMap, name)
+			}
 		}
 	}
 }
-func (olc *OnlineCache) OLCGetByName(name string) (oi UserTerminal,ok bool) {
-	olc.mutex.Lock()
-	defer olc.mutex.Unlock()
-	oi, ok = olc.nameChanMap[name]
-	return oi, ok
-}
 
-func (olc *OnlineCache) OLCAppendAndPop(name string,oinfo OnlineInfo) {
+func (olc *OnlineCache) OLCAppend(name string, oinfo OnlineInfo) {
 	olc.nameChanMap[name] = append(olc.nameChanMap[name], oinfo)
-	len := len(olc.nameChanMap[name])
-	if len > MaxTerminalCount{
+	count := len(olc.nameChanMap[name])
+	if count > MaxTerminalCount {
 		//close every conn
-		for i:=0; i < len-MaxTerminalCount;i++{
+		for i := 0; i < count-MaxTerminalCount; i++ {
 			//kickout previous player
 			olc.nameChanMap[name][i].conn.Close()
 		}
-		olc.nameChanMap[name] = olc.nameChanMap[name][len-MaxTerminalCount:len]
+		//olc.nameChanMap[name] = olc.nameChanMap[name][len-MaxTerminalCount:len]
 	}
 }
 
 func (olc *OnlineCache) OLCGetLen(name string) int {
 	olc.getLenCh <- name
 	select {
-	case val := <- olc.getLenReCh:{
-		return val
-	}
+	case val := <-olc.getLenReCh:
+		{
+			return val
+		}
 	}
 }
 
 func (olc *OnlineCache) OLCDelete(name string) {
-	olc.mutex.Lock()
-	defer olc.mutex.Unlock()
-	delete(olc.nameChanMap,name)//delete only if the last conn
+	olc.deleteOnlineInfoCh <- name
+}
+
+func (olc *OnlineCache) OLCPop(name string) {
+	olc.popOnlineInfoCh <- name
 }
 
 type ConnHelper struct {
-	db DBManager
+	db  DBManager
 	olc OnlineCache
 }
-func (chp *ConnHelper) Initialize(){
+
+func (chp *ConnHelper) Initialize() {
 	fmt.Print("ConnHelper Initialize\n")
 	//chp.db = DBManager{}
 	//chp.olc = OnlineCache{}
 	InitializeAll(&chp.db, &chp.olc)
 }
-func (chp *ConnHelper) DBVerifyAccount(conn net.Conn) string{
+func (chp *ConnHelper) DBVerifyAccount(conn net.Conn) string {
 	//先验证用户名密码，如果用户名首次出现则认为注册，否则验证密码正确性直到密码正确
 	fmt.Fprintf(conn, "%s\r\n", "Hello, this is WonderServer. Please Input Your Name!")
 	input := bufio.NewScanner(conn)
@@ -171,12 +187,12 @@ func (chp *ConnHelper) DBVerifyAccount(conn net.Conn) string{
 		input.Scan()
 		pwd = input.Text()
 		//db.accountDB[name] = pwd
-		chp.DBSetName(name,pwd)
-	} else{
+		chp.DBSetName(name, pwd)
+	} else {
 		fmt.Fprintf(conn, "%s\r\n", name+": Old Player Welcome!")
 		fmt.Fprintf(conn, "%s\r\n", name+": Please Input Your Password!")
 		input.Scan()
-		for input.Text() != pwd{
+		for input.Text() != pwd {
 			fmt.Fprintf(conn, "%s\r\n", "Password Wrong! Please Input Again!")
 			input.Scan()
 		}
@@ -188,24 +204,23 @@ func (chp *ConnHelper) DBChekName(name string) (string, bool) {
 	return chp.db.DBChekName(name)
 }
 func (chp *ConnHelper) DBSetName(name string, pwd string) {
-	chp.db.DBSetName(name,pwd)
+	chp.db.DBSetName(name, pwd)
 }
-func (chp *ConnHelper)OnlineCacheAccountLogin(name string, conn net.Conn) OnlineInfo {
-	oinfo := OnlineInfo{make(chan string),conn}
-	chp.OLCAppendAndPop(name, oinfo)
+func (chp *ConnHelper) OnlineCacheAccountLogin(name string, conn net.Conn) OnlineInfo {
+	oinfo := OnlineInfo{make(chan string), conn}
+	//chp.OLCAppendAndPop(name, oinfo)
+	chp.OLCAppend(name, oinfo)
 	fmt.Fprintf(conn, "%s\r\n", name+": OnlineCacheAccountLogin Success!")
 	return oinfo
 }
-func (chp *ConnHelper) OLCGetByName(name string) (UserTerminal, bool) {
-	return chp.olc.OLCGetByName(name)
-}
-func (chp *ConnHelper) OLCAppendAndPop(name string, oinfo OnlineInfo) {
+
+func (chp *ConnHelper) OLCAppend(name string, oinfo OnlineInfo) {
 	//chp.olc.OLCAppendAndPop(name, oinfo)
 	chp.olc.setNameInfoCh <- NameInfo{name, oinfo}
 	//TODO: need to wait success!
 }
 
-func (chp *ConnHelper) OLCGetLen(name string) int{
+func (chp *ConnHelper) OLCGetLen(name string) int {
 	return chp.olc.OLCGetLen(name)
 }
 
@@ -213,23 +228,27 @@ func (chp *ConnHelper) OLCDelete(name string) {
 	chp.olc.OLCDelete(name)
 }
 
-var (//like C++ Singleton
-	cher = ConnHelper{}
+func (chp *ConnHelper) OLCPop(name string) {
+	chp.olc.OLCPop(name)
+}
+
+var ( //like C++ Singleton
+	cher             = ConnHelper{}
 	MaxTerminalCount = 1
 )
 
-func main()  {
+func main() {
 	caster := BroadCaster{}
 	cher.Initialize()
 	caster.Initialize()
 	listener, err := net.Listen("tcp", ":8000")
-	if err != nil{
+	if err != nil {
 		log.Fatal(err)
 	}
 	go broadcaster(caster)
-	for{
+	for {
 		conn, err := listener.Accept()
-		if err != nil{
+		if err != nil {
 			log.Print(err)
 			continue
 		}
@@ -237,18 +256,19 @@ func main()  {
 	}
 }
 
-type client chan<-string//广播器
-type BroadCaster struct{
+type client chan<- string //广播器
+type BroadCaster struct {
 	entering chan client
-	leaving chan client
-	messages chan string//所有接受的客户消息
-	clients map[client]bool//所有已连接的客户消息通道组成的map
+	leaving  chan client
+	messages chan string     //所有接受的客户消息
+	clients  map[client]bool //所有已连接的客户消息通道组成的map
 }
+
 func (bro *BroadCaster) Initialize() {
 	bro.entering = make(chan client)
 	bro.leaving = make(chan client)
 	bro.messages = make(chan string)
-	bro.clients = make(map[client]bool)//所有已连接的客户消息通道组成的map
+	bro.clients = make(map[client]bool) //所有已连接的客户消息通道组成的map
 	fmt.Print("BroadCaster Initialize\n")
 }
 
@@ -257,17 +277,17 @@ func broadcaster(caster BroadCaster) {
 	for {
 		select {
 		case msg := <-caster.messages:
-			for cli := range caster.clients{
+			for cli := range caster.clients {
 				cli <- msg
 			}
 		case cli := <-caster.entering:
 			caster.clients[cli] = true
 		case cli := <-caster.leaving:
-			if _,ok:=caster.clients[cli]; ok{
+			if _, ok := caster.clients[cli]; ok {
 				fmt.Printf("leaving once!\n")
-				delete(caster.clients,cli)
+				delete(caster.clients, cli)
 				close(cli)
-			}else{
+			} else {
 				fmt.Printf("leaving twice!\n")
 			}
 		}
@@ -289,13 +309,15 @@ func handleConn(conn net.Conn, caster BroadCaster) {
 	caster.entering <- oinfo.ch
 
 	input := bufio.NewScanner(conn)
-	for input.Scan(){
+	for input.Scan() {
 		caster.messages <- name + ": " + input.Text()
 	}
 
 	caster.leaving <- oinfo.ch
 	caster.messages <- name + " has left"
 	conn.Close()
+
+	cher.OLCPop(name)
 
 	fmt.Printf(name+" conn Close! OLCGetLen = %d\n", cher.OLCGetLen(name))
 	if cher.OLCGetLen(name) == 0 {
@@ -304,7 +326,7 @@ func handleConn(conn net.Conn, caster BroadCaster) {
 }
 
 func clientWriter(conn net.Conn, ch chan string) {
-	for msg := range ch{
+	for msg := range ch {
 		fmt.Fprintf(conn, "%s\r\n", msg)
 	}
 }
