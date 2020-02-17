@@ -17,10 +17,6 @@ func InitializeAll(initializers ...Initializer) {
 	}
 }
 
-type GetNameRe struct {
-	pwd string
-	ok  bool
-}
 type NamePwd struct {
 	name string
 	pwd  string
@@ -29,26 +25,27 @@ type DBManager struct {
 	accountDB map[string]string //存储用户名密码
 	//setch     chan map[string]string //DB的channel
 	//getch     chan bool
-	getNameCh   chan string
-	getNameReCh chan GetNameRe
+	getNameCh   chan NamePwd
+	getNameReCh chan bool
 	setPwdCh    chan NamePwd
 }
 
 func (db *DBManager) Initialize() {
 	db.accountDB = make(map[string]string)
 	//db.dbch = make(chan map[string]string)
-	db.getNameCh = make(chan string)
-	db.getNameReCh = make(chan GetNameRe)
+	db.getNameCh = make(chan NamePwd)
+	db.getNameReCh = make(chan bool)
 	db.setPwdCh = make(chan NamePwd)
 	go db.ChannelOp()
 	fmt.Print("DBManager Initialize\n")
 	fmt.Println(db.accountDB)
 }
-func (db *DBManager) DBChekName(name string) (string, bool) {
-	db.getNameCh <- name
+func (db *DBManager) DBChekNamePwd(name string, pwd string) bool {
+	db.getNameCh <- NamePwd{name, pwd}
 	select {
-	case result := <-db.getNameReCh:
-		return result.pwd, result.ok
+	case ok := <-db.getNameReCh:
+		fmt.Printf("DBChekNamePwd ok = %t\n", ok)
+		return ok
 	}
 }
 func (db *DBManager) DBSetName(name string, pwd string) {
@@ -60,16 +57,23 @@ func (db *DBManager) DBSetName(name string, pwd string) {
 func (db *DBManager) ChannelOp() {
 	for {
 		select {
-		case name := <-db.getNameCh:
+		case result := <-db.getNameCh:
 			{
-				pwd, ok := db.accountDB[name]
-				db.getNameReCh <- GetNameRe{pwd, ok}
+				pwd, ok := db.accountDB[result.name]
+				if ok {
+					db.getNameReCh <- pwd == result.pwd
+				} else {
+					db.accountDB[result.name] = result.pwd
+					db.getNameReCh <- true
+				}
+
 			}
 		case val := <-db.setPwdCh:
 			{
 				//TODO: need to return false, cauze two terminal may DBChekName simultaneously,
 				//so check if “db.accountDB[name] = pwd” already exist, if so return false caz register already
 				db.accountDB[val.name] = val.pwd
+				fmt.Println(db.accountDB)
 			}
 		}
 	}
@@ -174,36 +178,32 @@ func (chp *ConnHelper) Initialize() {
 	//chp.olc = OnlineCache{}
 	InitializeAll(&chp.db, &chp.olc)
 }
-func (chp *ConnHelper) DBVerifyAccount(conn net.Conn) string {
+func (chp *ConnHelper) DBVerifyAccount(conn net.Conn) (name string, err error) {
 	//先验证用户名密码，如果用户名首次出现则认为注册，否则验证密码正确性直到密码正确
-	fmt.Fprintf(conn, "%s\r\n", "Hello, this is WonderServer. Please Input Your Name!")
+	_, err = fmt.Fprintf(conn, "%s\r\n", "Hello, this is WonderServer. Please Input Your Name and Password!")
 	input := bufio.NewScanner(conn)
-	input.Scan()
-	name := input.Text()
-	pwd, ok := chp.DBChekName(name)
-	if !ok {
-		fmt.Fprintf(conn, "%s\r\n", name+": Register Success!")
-		fmt.Fprintf(conn, "%s\r\n", name+": Please Register Your Password!")
+	ok := false
+	for !ok {
 		input.Scan()
-		pwd = input.Text()
-		//db.accountDB[name] = pwd
-		chp.DBSetName(name, pwd)
-	} else {
-		fmt.Fprintf(conn, "%s\r\n", name+": Old Player Welcome!")
-		fmt.Fprintf(conn, "%s\r\n", name+": Please Input Your Password!")
+		name = input.Text()
 		input.Scan()
-		for input.Text() != pwd {
-			fmt.Fprintf(conn, "%s\r\n", "Password Wrong! Please Input Again!")
-			input.Scan()
+		pwd := input.Text()
+
+		ok = chp.DBChekNamePwd(name, pwd)
+		if !ok {
+			_, err = fmt.Fprintf(conn, "%s\r\n", name+": Name or Password Wrong!")
+		} else {
+			_, err = fmt.Fprintf(conn, "%s\r\n", name+": DBVerifyAccount Success!")
+			_, err = fmt.Fprintf(conn, "%s\r\n", name+": Login Success!")
 		}
 	}
-	fmt.Fprintf(conn, "%s\r\n", name+": DBVerifyAccount Success!")
-	return name
+	return name, err
 }
-func (chp *ConnHelper) DBChekName(name string) (string, bool) {
-	return chp.db.DBChekName(name)
+func (chp *ConnHelper) DBChekNamePwd(name string, pwd string) bool {
+	return chp.db.DBChekNamePwd(name, pwd)
 }
 func (chp *ConnHelper) DBSetName(name string, pwd string) {
+	//TODO: DBSetName Can be rename to change db name and password
 	chp.db.DBSetName(name, pwd)
 }
 func (chp *ConnHelper) OnlineCacheAccountLogin(name string, conn net.Conn) OnlineInfo {
@@ -296,8 +296,11 @@ func broadcaster(caster BroadCaster) {
 
 func handleConn(conn net.Conn, caster BroadCaster) {
 	//First verify account correctly!
-	//TODO: DBVerifyAccount must contain and solve error
-	name := cher.DBVerifyAccount(conn)
+	//DBVerifyAccount must contain and solve error
+	name, err := cher.DBVerifyAccount(conn)
+	if err != nil {
+		log.Fatal(err)
+	}
 	//direct add user to olc, if greater than default, pop front
 	oinfo := cher.OnlineCacheAccountLogin(name, conn)
 
